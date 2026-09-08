@@ -3,8 +3,8 @@
 <head>
 	<meta charset="UTF-8">
 	<title>短链接生成</title>
-	<link rel="icon" href="/img/favicon.ico">
-	<link rel="stylesheet" href="/css/base.css">
+	<link rel="icon" href="img/favicon.ico">
+	<link rel="stylesheet" href="css/base.css">
 </head>
 <body>
 	<div class="box">
@@ -23,14 +23,14 @@
 			<button type="button" id="copy" style="width:100px;" data-clipboard-action="copy" data-clipboard-target="#short">Copy</button>
 		</div>
 	</div>
-	<script src="/js/jquery.min.js"></script>
-	<script src="/js/clipboard.min.js"></script>
+	<script src="js/jquery.min.js"></script>
+	<script src="js/clipboard.min.js"></script>
 	<script>
 		$('#generate').click(() => {
 			let longURL = $('#long').val();
 			if (longURL) {
               $.ajax({
-                url: "/generate",
+                url: "generate",
                 type: "POST",
                 contentType: "application/json",
                 data: JSON.stringify({

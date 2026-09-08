@@ -1,36 +1,106 @@
 # 短链接服务
 
-长链接生成短链接，访问短链接 302 重定向至原始长链接
+基于 Spring Boot、MySQL 和 Redis 的短链接生成与 302 重定向服务。提交 `http/https` 长链接后生成 Base62 短码，访问短码时跳转到原始地址并异步累加访问量。
 
-[![](./snapshoot.png)](https://d.naccl.top/)
+## 功能与安全边界
 
-| 依赖        | 说明                  |
-| ----------- | --------------------- |
-| Spring Boot | MVC 框架              |
-| thymeleaf   | 模板引擎              |
-| MyBatis     | ORM 框架              |
-| Redis       | 缓存                  |
-| hutool      | Hash 算法、布隆过滤器 |
+- `POST /generate`：生成短链接，默认按 IP 每 10 秒最多 1 次。
+- `GET /{shortCode}`：查询短码并返回 302；不存在时回到首页。
+- 仅接受 `http` 和 `https`，长度不超过 2000 字符，不接受 URL 用户信息（如 `user:password@host`）。服务不会抓取目标地址，但短链接仍可能被用于钓鱼，生产环境应增加内容审核、域名黑名单和身份认证。
+- Redis 用于热点缓存和原子限流，MySQL 用于持久化。短链缓存键格式为 `short:url:{短码}`，限流键前缀为 `short:rate-limit:`。服务默认监听所有网卡的 8060 端口；如不需要公网直连，请通过 `SERVER_ADDRESS=127.0.0.1` 覆盖并仅使用 Nginx 代理。
 
-## 实现
+## 环境要求
 
-使用 MurmurHash 算法将原始长链接 hash 为 32 位散列值，将散列值转为 62 进制字符串，即为短链接，将短链接添加入布隆过滤器，并向 Redis 添加指定过期时间的缓存。用户访问短链接，在 Redis 中查找是否存在缓存，存在则延长缓存时间；不存在，查找数据库并添加缓存，302 重定向至原始长链接，并自增短链接访问量。
+- JDK 8+、Maven 3.6+、MySQL 5.7/8.0、Redis 5+
 
-## 技术选型
+## 本地运行
 
-MurmurHash：长链转短链自然需要一个哈希算法，应用的类型决定了我们并不需要解密，而是关心运算速度和冲突概率，MurmurHash 就是一种非加密型哈希算法，与 MD5、SHA 等常见哈希函数相比，性能与随机分布特征都要更佳。MurmurHash 有 32 bit、64 bit、128 bit 的实现，32 bit 已经足够表示近 43 亿个短链接。使用 Java 的话，在 Google 的 [guava](https://github.com/google/guava) 或 [hutool](https://github.com/dromara/hutool) 中有相应实现，这里使用 hutool。
+```bash
+mysql -uroot -p -e "CREATE DATABASE dwz CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;"
+mysql -uroot -p dwz < short_url.sql
+mvn clean package -DskipTests
+java -jar target/dwz-0.0.1.jar --server.host=https://investreport.online/shortUrl/
+```
 
-base62：MurmurHash 生成的哈希值最长有 10 位十进制数，为了进一步缩短短链接长度，可以将哈希值转为 62 进制，最长为 6 个字符。
+连接配置通过环境变量提供，避免将凭据提交到仓库：
 
-布隆过滤器：哈希函数不可避免会产生哈希冲突，随着短链接越来越多，冲突概率也会越大。每次生成短链接后，向布隆过滤器中查找是否已经存在此短链接，如果已经存在，则在长链接后添加一个自定义字符串，重新 hash，重复上一步，直到没有哈希冲突，把短链接加入布隆过滤器。这里使用 hutool 工具包中基于 JVM 的布隆过滤器来实现。
+```bash
+SPRING_DATASOURCE_URL=jdbc:mysql://127.0.0.1:3306/dwz?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=GMT%2B8
+SPRING_DATASOURCE_USERNAME=dwz
+SPRING_DATASOURCE_PASSWORD=change-me
+SPRING_REDIS_HOST=127.0.0.1
+SPRING_REDIS_PASSWORD=change-me
+```
 
-Redis：生成短链接后，通常在后续一段时间内此短链接的使用频率较高，则向 Redis 中添加带过期时间的缓存来减轻数据库压力。
+默认监听 `0.0.0.0:8060`，因此所有可达 IP 均可访问；可通过 `SERVER_ADDRESS` 限制绑定地址。默认短链前缀为 `https://investreport.online/shortUrl/`，`server.host` 必须以 `/` 结尾，并设置为用户实际访问的 HTTPS 地址。
 
-302 状态码：301 为永久重定向、302 为临时重定向，通常需要记录短链接访问次数或需要修改、删除短链接时，使用 302 临时重定向来处理，和服务器压力相比，数据的价值往往更大。
+## 生产部署方案
 
+建议使用专用 Linux 用户运行，MySQL/Redis 仅监听内网或本机。若需要公网直接访问短链，可在防火墙开放 8060；否则只开放 80/443。将 jar 放在 `/opt/dwz`，使用 systemd：
 
+```ini
+# /etc/systemd/system/dwz.service
+[Unit]
+Description=DWZ short URL service
+After=network.target mysql.service redis.service
+[Service]
+User=dwz
+WorkingDirectory=/opt/dwz
+Environment="SPRING_PROFILES_ACTIVE=dev"
+EnvironmentFile=/etc/dwz/dwz.env
+ExecStart=/usr/bin/java -Xms256m -Xmx512m -jar /opt/dwz/dwz-0.0.1.jar --server.host=https://investreport.online/shortUrl/
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+```
 
-## 声明
+`/etc/dwz/dwz.env` 保存 `SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD`、`SPRING_REDIS_HOST`、`SPRING_REDIS_PASSWORD` 等变量，并限制为 root/dwz 可读。执行 `systemctl daemon-reload && systemctl enable --now dwz`，用 `journalctl -u dwz -f` 查看日志。
 
-本在线网站只用于项目展示，随时可能关闭，并不保证绝对的可用性，切勿用于商业用途或非法传播，因此产生的任何纠纷与本人无关。
+## Nginx HTTPS 反向代理
 
+证书可使用 certbot 申请。配置将公网 443 转发到本机 8060，并传递真实客户端地址：
+
+```nginx
+server {
+    listen 80;
+    server_name investreport.online;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name investreport.online;
+    ssl_certificate /etc/letsencrypt/live/investreport.online/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/investreport.online/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 16k;
+    location = /shortUrl {
+        return 301 /shortUrl/;
+    }
+    location /shortUrl/ {
+        proxy_pass http://127.0.0.1:8060/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+    }
+}
+```
+
+替换域名和证书路径后执行 `nginx -t && systemctl reload nginx`。若仅通过 Nginx 提供服务，安全组/防火墙应禁止外部访问 TCP 8060；若需要所有 IP 直接访问，则开放该端口并确保应用自身已做好限流和监控。
+
+## API 示例
+
+```bash
+curl -X POST https://investreport.online/shortUrl/generate -H 'Content-Type: application/json' -d '{"longURL":"https://www.example.com/path?a=1"}'
+```
+
+成功响应：`{"code":200,"msg":"请求成功","data":"https://investreport.online/shortUrl/abc123"}`。
+
+## 运维建议
+
+定期备份 MySQL `url_map` 表，监控 Redis/MySQL、应用 5xx 和 302 命中率；升级依赖时执行 `mvn test` 并检查安全公告。
